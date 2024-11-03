@@ -47,6 +47,50 @@ class SensorQMI8658 :
     friend class SensorCommon<SensorQMI8658>;
 public:
 
+    uint16_t readFifoCustom(IMUdata *buffer, uint16_t maxSamples)
+    {
+        writeCommand(SensorQMI8658::CTRL_CMD_REQ_FIFO);
+
+        uint16_t samplesRead = 0;
+
+        for (uint16_t i = 0; i < maxSamples; ++i)
+        {
+            uint8_t data[6];
+            // Read 6 bytes in one go for X, Y, and Z axes
+            if (readRegister(QMI8658_REG_FIFO_DATA, data, 6) == DEV_WIRE_ERR)
+            {
+                Serial.println("Error reading FIFO data.");
+                break;
+            }
+            IMUdata &sample = buffer[i];
+
+            int16_t rawX = data[0] | (data[1] << 8);
+            int16_t rawY = data[2] | (data[3] << 8);
+            int16_t rawZ = data[4] | (data[5] << 8);
+
+            // Check for end-of-data pattern but do not stop reading
+            if (rawX == -32768 && rawY == -32768 && rawZ == -32768)
+            {
+                // Serial.println("End-of-data pattern detected.");
+                break; // Skip storing this sample and continue reading
+            }
+
+            // Apply scaling
+            sample.x = rawX * accelScales;
+            sample.y = rawY * accelScales;
+            sample.z = rawZ * accelScales;
+
+            samplesRead++; // Increment samples read
+        }
+
+        uint8_t fifo_ctrl_before = readRegister(QMI8658_REG_FIFO_CTRL);
+
+        // Clear the FIFO_rd_mode bit (bit 7) in FIFO_CTRL
+        uint8_t fifo_ctrl = fifo_ctrl_before & ~(1 << 7); // Clear bit 7
+        writeRegister(QMI8658_REG_FIFO_CTRL, fifo_ctrl);
+
+        return samplesRead;
+    }
     typedef void (*EventCallBack_t)(void);
 
     enum AccelRange {
