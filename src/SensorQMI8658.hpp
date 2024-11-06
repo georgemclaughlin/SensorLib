@@ -52,45 +52,80 @@ public:
         writeCommand(SensorQMI8658::CTRL_CMD_REQ_FIFO);
 
         uint16_t samplesRead = 0;
+        const uint16_t sampleSize = 6; // 6 bytes per sample
 
-        for (uint16_t i = 0; i < maxSamples; ++i)
+        // Decide how many samples to read per chunk
+        // const uint16_t samplesPerChunk = 6;                      // For example, read 6 samples per chunk
+        const uint16_t samplesPerChunk = 16;                      // For example, read 6 samples per chunk
+        const uint16_t chunkSize = sampleSize * samplesPerChunk; // Total bytes per chunk
+        bool currentSendStop = __sendStop;
+        // __sendStop = false;
+        while (samplesRead < maxSamples)
         {
-            uint8_t data[6];
-            // Read 6 bytes in one go for X, Y, and Z axes
-            if (readRegister(QMI8658_REG_FIFO_DATA, data, 6) == DEV_WIRE_ERR)
+            // Calculate how many samples we can read in this iteration
+            uint16_t remainingSamples = maxSamples - samplesRead;
+            uint16_t samplesToRead = (remainingSamples >= samplesPerChunk) ? samplesPerChunk : remainingSamples;
+            uint16_t bytesToRead = samplesToRead * sampleSize;
+
+            // Prepare buffer to read data
+            uint8_t data[bytesToRead];
+
+            // Read multiple samples in one transaction
+            if (readRegister(QMI8658_REG_FIFO_DATA, data, bytesToRead) == DEV_WIRE_ERR)
             {
                 Serial.println("Error reading FIFO data.");
                 break;
             }
-            IMUdata &sample = buffer[i];
 
-            int16_t rawX = data[0] | (data[1] << 8);
-            int16_t rawY = data[2] | (data[3] << 8);
-            int16_t rawZ = data[4] | (data[5] << 8);
+            bool endOfDataDetected = false; // Flag to indicate end-of-data pattern
 
-            // Check for end-of-data pattern but do not stop reading
-            if (rawX == -32768 && rawY == -32768 && rawZ == -32768)
+            // Process each sample
+            for (uint16_t i = 0; i < samplesToRead; ++i)
             {
-                // Serial.println("End-of-data pattern detected.");
-                break; // Skip storing this sample and continue reading
+                IMUdata &sample = buffer[samplesRead];
+
+                int16_t rawX = data[i * sampleSize + 0] | (data[i * sampleSize + 1] << 8);
+                int16_t rawY = data[i * sampleSize + 2] | (data[i * sampleSize + 3] << 8);
+                int16_t rawZ = data[i * sampleSize + 4] | (data[i * sampleSize + 5] << 8);
+
+                // Check for end-of-data pattern
+                if (rawX == -32768 && rawY == -32768 && rawZ == -32768)
+                {
+                    // End-of-data pattern detected
+                    endOfDataDetected = true;
+                    break; // Exit the inner loop
+                }
+
+                // Apply scaling
+                sample.x = rawX * accelScales;
+                sample.y = rawY * accelScales;
+                sample.z = rawZ * accelScales;
+
+                samplesRead++;
             }
 
-            // Apply scaling
-            sample.x = rawX * accelScales;
-            sample.y = rawY * accelScales;
-            sample.z = rawZ * accelScales;
-
-            samplesRead++; // Increment samples read
+            // If end-of-data pattern was detected, break the outer loop
+            if (endOfDataDetected)
+            {
+                break;
+            }
         }
-
-        uint8_t fifo_ctrl_before = readRegister(QMI8658_REG_FIFO_CTRL);
-
-        // Clear the FIFO_rd_mode bit (bit 7) in FIFO_CTRL
+        __sendStop = currentSendStop;
+        // Clear the FIFO read mode if necessary
+        uint8_t fifo_ctrl_before;
+        if (readRegister(QMI8658_REG_FIFO_CTRL, &fifo_ctrl_before, 1) == DEV_WIRE_ERR)
+        {
+            Serial.println("Error reading FIFO control register.");
+        }
         uint8_t fifo_ctrl = fifo_ctrl_before & ~(1 << 7); // Clear bit 7
-        writeRegister(QMI8658_REG_FIFO_CTRL, fifo_ctrl);
+        if (writeRegister(QMI8658_REG_FIFO_CTRL, &fifo_ctrl, 1) == DEV_WIRE_ERR)
+        {
+            Serial.println("Error writing FIFO control register.");
+        }
 
         return samplesRead;
     }
+
     typedef void (*EventCallBack_t)(void);
 
     enum AccelRange {
